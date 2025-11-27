@@ -10,7 +10,7 @@ class TractorTrailerSim:
     CONFIG_FILE = "truck_sim_config.json" # Define config file constant
     def __init__(self, root):
         self.root = root
-        self.root.title("트랙터-트레일러 주행 시뮬레이터 (v24.0 - 실행 오류 수정)")
+        self.root.title("트랙터-트레일러 주행 시뮬레이터 (v1.6 - 프리셋 기능 확장 및 버그 수정)")
 
         self.animation_id = None
         self.setup_logging()
@@ -38,9 +38,12 @@ class TractorTrailerSim:
         self.initial_angle_for_stop = None
         self.previous_angle_error = None
         
-        # --- History ---
+        # --- History & Presets ---
         self.history = deque(maxlen=50)
-        self._ignore_history_selection = False # Flag to prevent selection event loops
+        self._ignore_history_selection = False
+        self.presets = {}
+        self.PRESETS_FILE = "truck_sim_presets.json"
+        self.preset_load_buttons = []
 
         # --- 뷰 이동(Panning) 변수 ---
         self.pan_start_x = 0
@@ -65,8 +68,10 @@ class TractorTrailerSim:
         self.canvas.bind("<B1-Motion>", self._pan_move)
 
         self.setup_controls()
-        self.setup_history_panel() # New method for history panel
-        self._load_config() # Load configuration after controls are set up
+        self.setup_preset_panel()   # New method for preset panel
+        self.setup_history_panel()  # Existing method for history panel
+        self._load_config()         # Load general config
+        self._load_presets()        # New method to load presets from file
 
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
         self.logger.info("="*50)
@@ -221,6 +226,152 @@ class TractorTrailerSim:
         self.scale_bg_scale.grid(row=2, column=1, sticky="ew")
         
         bg_control_frame.grid_columnconfigure(1, weight=1)
+
+    def setup_preset_panel(self):
+        preset_frame = tk.LabelFrame(self.right_frame, text="--- 프리셋 (Preset) ---", padx=5, pady=5)
+        preset_frame.pack(fill=tk.X, pady=(0, 10))
+
+        num_presets = 5
+        for i in range(num_presets):
+            slot_num = i + 1
+            
+            load_btn = tk.Button(preset_frame, text=f"프리셋 {slot_num} 로드", command=lambda s=slot_num: self._load_preset(s), state=tk.DISABLED)
+            load_btn.grid(row=i, column=0, sticky="ew", padx=2, pady=2)
+            self.preset_load_buttons.append(load_btn)
+
+            save_btn = tk.Button(preset_frame, text=f"프리셋 {slot_num} 저장", command=lambda s=slot_num: self._save_preset(s))
+            save_btn.grid(row=i, column=1, sticky="ew", padx=2, pady=2)
+
+        preset_frame.grid_columnconfigure((0, 1), weight=1)
+
+        ttk.Separator(preset_frame, orient='horizontal').grid(row=num_presets, column=0, columnspan=2, sticky='ew', pady=10)
+
+        tk.Button(preset_frame, text="상태 직접 지정", command=self._open_manual_state_dialog).grid(row=num_presets + 1, column=0, columnspan=2, sticky='ew', pady=2)
+
+    def _load_presets(self):
+        if os.path.exists(self.PRESETS_FILE):
+            try:
+                with open(self.PRESETS_FILE, 'r', encoding='utf-8') as f:
+                    self.presets = json.load(f)
+                self.logger.info("프리셋 로드 완료.")
+                # Update button states based on loaded presets
+                for i, btn in enumerate(self.preset_load_buttons):
+                    if f"slot_{i+1}" in self.presets:
+                        btn.config(state=tk.NORMAL)
+            except Exception as e:
+                self.logger.error(f"프리셋 로드 실패: {e}")
+        else:
+            self.logger.info("저장된 프리셋 파일이 없습니다.")
+
+    def _save_presets(self):
+        try:
+            with open(self.PRESETS_FILE, 'w', encoding='utf-8') as f:
+                json.dump(self.presets, f, indent=4)
+            self.logger.info("프리셋 저장 완료.")
+        except Exception as e:
+            self.logger.error(f"프리셋 저장 실패: {e}")
+
+    def _save_preset(self, slot_number):
+        slot_key = f"slot_{slot_number}"
+        self.presets[slot_key] = self._capture_state()
+        self._save_presets()
+        self.preset_load_buttons[slot_number - 1].config(state=tk.NORMAL)
+        messagebox.showinfo("프리셋 저장", f"현재 상태를 프리셋 {slot_number}에 저장했습니다.")
+
+    def _load_preset(self, slot_number):
+        slot_key = f"slot_{slot_number}"
+        if slot_key in self.presets:
+            state_to_restore = self.presets[slot_key]
+            self._restore_state(state_to_restore)
+            
+            # Clear and reset history
+            self.history.clear()
+            description = f"프리셋 {slot_number} 로드"
+            self.history.append((description, self._capture_state()))
+            self._update_history_listbox()
+
+            messagebox.showinfo("프리셋 로드", f"프리셋 {slot_number}을(를) 로드했습니다.")
+        else:
+            messagebox.showerror("오류", f"저장된 프리셋 {slot_number}이(가) 없습니다.")
+
+    def _open_manual_state_dialog(self):
+        dialog = tk.Toplevel(self.root)
+        dialog.title("상태 직접 지정")
+        dialog.geometry("300x200")
+        dialog.transient(self.root) # Keep dialog on top of the main window
+
+        entries = {}
+        
+        frame = tk.Frame(dialog, padx=10, pady=10)
+        frame.pack(fill=tk.BOTH, expand=True)
+
+        fields = {
+            "X 위치 (m)": "x",
+            "Y 위치 (m)": "y",
+            "트랙터 각도 (deg)": "yaw_tractor",
+            "꺾인 각도 (deg)": "articulation_angle"
+        }
+
+        # Get current values to pre-populate the dialog
+        current_state = self._capture_state()
+        current_articulation_rad = current_state['yaw_tractor'] - current_state['yaw_trailer']
+        
+        defaults = {
+            "x": f"{current_state['x']:.2f}",
+            "y": f"{current_state['y']:.2f}",
+            "yaw_tractor": f"{math.degrees(current_state['yaw_tractor']):.2f}",
+            "articulation_angle": f"{math.degrees(current_articulation_rad):.2f}"
+        }
+
+        for i, (text, key) in enumerate(fields.items()):
+            tk.Label(frame, text=text).grid(row=i, column=0, sticky='w', pady=2)
+            entry = tk.Entry(frame)
+            entry.grid(row=i, column=1, sticky='ew', pady=2)
+            entry.insert(0, defaults[key])
+            entries[key] = entry
+        
+        frame.grid_columnconfigure(1, weight=1)
+
+        def _apply_manual_state():
+            try:
+                x = float(entries['x'].get())
+                y = float(entries['y'].get())
+                yaw_tractor_deg = float(entries['yaw_tractor'].get())
+                articulation_angle_deg = float(entries['articulation_angle'].get())
+
+                # Create a partial state and use _restore_state to fill in the rest
+                # Note: We need to calculate yaw_trailer from the articulation angle
+                yaw_tractor_rad = math.radians(yaw_tractor_deg)
+                articulation_angle_rad = math.radians(articulation_angle_deg)
+                yaw_trailer_rad = yaw_tractor_rad - articulation_angle_rad
+
+                # Get a full default state to modify
+                new_state = self._capture_state() 
+                new_state['x'] = x
+                new_state['y'] = y
+                new_state['yaw_tractor'] = yaw_tractor_rad
+                new_state['yaw_trailer'] = yaw_trailer_rad
+                new_state['wheel_paths'] = {} # Clear paths on teleport
+
+                self._restore_state(new_state)
+                self._initialize_paths() # Re-initialize paths at the new location
+
+                # Clear and reset history
+                self.history.clear()
+                description = "상태 직접 지정"
+                self.history.append((description, self._capture_state()))
+                self._update_history_listbox()
+
+                dialog.destroy()
+
+            except ValueError:
+                messagebox.showerror("입력 오류", "유효한 숫자를 입력해주세요.", parent=dialog)
+            except Exception as e:
+                messagebox.showerror("오류", f"상태 적용 중 오류가 발생했습니다:\n{e}", parent=dialog)
+
+        apply_btn = tk.Button(frame, text="적용", command=_apply_manual_state)
+        apply_btn.grid(row=len(fields), column=0, columnspan=2, pady=(10, 0), sticky='ew')
+
 
     def setup_history_panel(self):
         # --- History ---
@@ -707,13 +858,47 @@ class TractorTrailerSim:
         kpx, kpy = self.to_screen(self.x, self.y, view_offset_x, view_offset_y)
         self.canvas.create_oval(kpx-4, kpy-4, kpx+4, kpy+4, fill="yellow", outline="black")
         
-        # 7. Info text (ALWAYS LAST to be on top)
+        # Calculate current angle difference
         current_angle_diff_rad = self.yaw_tractor - self.yaw_trailer
-        current_angle_diff_deg = abs(math.degrees(current_angle_diff_rad))
+        current_angle_diff_deg = math.degrees(current_angle_diff_rad) # Use actual signed value
+
+        # Determine direction for display (User prefers signed display for non-zero, and 0 for exact)
+        if current_angle_diff_deg > 0: 
+            angle_display_text = f"좌 {current_angle_diff_deg:.1f}°"
+        elif current_angle_diff_deg < 0:
+            angle_display_text = f"우 {abs(current_angle_diff_deg):.1f}°" # abs를 사용하여 양수로 표시
+        else: # Exactly zero
+            angle_display_text = f"0.0°"
+
         steer_deg = self.scale_angle.get()
+        # Determine direction for steer angle display
+        if steer_deg > 0:
+            steer_display_text = f"좌 {steer_deg:.1f}°"
+        elif steer_deg < 0:
+            steer_display_text = f"우 {abs(steer_deg):.1f}°"
+        else:
+            steer_display_text = f"0.0°"
         
-        info_text = f"꺾임 각도: {current_angle_diff_deg:.1f}° | 조향각: {steer_deg:.1f}°"
-        self.canvas.create_text(self.canvas_width / 2, 30, text=info_text, 
+        info_text_str = f"현재 꺾인 각도: {angle_display_text} | 조향각: {steer_display_text}"
+        
+        # Calculate bounding box for the text to draw a background rectangle
+        # A rough estimate for text width, will be more accurate after creating text
+        # Using a fixed width multiplier and font size to estimate
+        text_width_estimate = len(info_text_str) * 25 # Increased multiplier
+        text_height_estimate = 40 # Based on font size 32
+        
+        # Position the rectangle behind the text
+        text_center_x = self.canvas_width / 2
+        text_top_y = 30
+        
+        rect_x1 = text_center_x - text_width_estimate / 2 - 20 # Increased padding
+        rect_y1 = text_top_y - 5
+        rect_x2 = text_center_x + text_width_estimate / 2 + 20 # Increased padding
+        rect_y2 = text_top_y + text_height_estimate + 5
+        
+        self.canvas.create_rectangle(rect_x1, rect_y1, rect_x2, rect_y2, fill="lightgray", outline="lightgray", tags="info_display_bg")
+        
+        self.canvas.create_text(text_center_x, text_top_y, text=info_text_str, 
                                 font=("Arial", 32, "bold"), fill="blue", tags="info_display", anchor='n')
 
     def draw_wheel(self, cx, cy, yaw, steer, is_dual, view_offset_x, view_offset_y):
