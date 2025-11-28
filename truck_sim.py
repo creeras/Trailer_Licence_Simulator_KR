@@ -10,7 +10,7 @@ class TractorTrailerSim:
     CONFIG_FILE = "truck_sim_config.json" # Define config file constant
     def __init__(self, root):
         self.root = root
-        self.root.title("트랙터-트레일러 주행 시뮬레이터 (v1.6 - 프리셋 기능 확장 및 버그 수정)")
+        self.root.title("트랙터-트레일러 주행 시뮬레이터 (v1.7 - 프리셋 기능 확장 및 버그 수정)")
 
         self.animation_id = None
         self.setup_logging()
@@ -44,6 +44,21 @@ class TractorTrailerSim:
         self.presets = {}
         self.PRESETS_FILE = "truck_sim_presets.json"
         self.preset_load_buttons = []
+        
+        self.free_set_mode = False # Flag to indicate if free set mode is active
+        self.ghost_state = {}     # Stores the tentative state of the ghost car
+        self.previous_canvas_bindings = {} # To store canvas bindings before free set mode
+        self.free_set_control_frame = None # Frame for Free Set buttons
+
+        self.dragging_part = None # 'tractor', 'trailer', 'kingpin', or None
+        self.start_drag_x = 0
+        self.start_drag_y = 0
+        self.start_part_x = 0 # World x of the part being dragged
+        self.start_part_y = 0 # World y of the part being dragged
+        self.start_part_yaw = 0 # Yaw of the part being dragged
+        self.last_mouse_x = 0
+        self.last_mouse_y = 0
+        self.free_set_initial_state = {} # Stores the state when Free Set mode was activated
 
         # --- 뷰 이동(Panning) 변수 ---
         self.pan_start_x = 0
@@ -246,7 +261,7 @@ class TractorTrailerSim:
 
         ttk.Separator(preset_frame, orient='horizontal').grid(row=num_presets, column=0, columnspan=2, sticky='ew', pady=10)
 
-        tk.Button(preset_frame, text="상태 직접 지정", command=self._open_manual_state_dialog).grid(row=num_presets + 1, column=0, columnspan=2, sticky='ew', pady=2)
+        tk.Button(preset_frame, text="Free Set", command=self._activate_free_set_mode).grid(row=num_presets + 1, column=0, columnspan=2, sticky="ew", padx=2, pady=2)
 
     def _load_presets(self):
         if os.path.exists(self.PRESETS_FILE):
@@ -294,85 +309,321 @@ class TractorTrailerSim:
         else:
             messagebox.showerror("오류", f"저장된 프리셋 {slot_number}이(가) 없습니다.")
 
-    def _open_manual_state_dialog(self):
-        dialog = tk.Toplevel(self.root)
-        dialog.title("상태 직접 지정")
-        dialog.geometry("300x200")
-        dialog.transient(self.root) # Keep dialog on top of the main window
-
-        entries = {}
+    def _activate_free_set_mode(self):
+        self.logger.info("Free Set 모드 활성화.")
+        self.free_set_mode = True
+        self.free_set_initial_state = self._capture_state() # Save state for cancellation
+        self.ghost_state = self.free_set_initial_state.copy() # Initialize ghost state with current state
         
-        frame = tk.Frame(dialog, padx=10, pady=10)
-        frame.pack(fill=tk.BOTH, expand=True)
-
-        fields = {
-            "X 위치 (m)": "x",
-            "Y 위치 (m)": "y",
-            "트랙터 각도 (deg)": "yaw_tractor",
-            "꺾인 각도 (deg)": "articulation_angle"
-        }
-
-        # Get current values to pre-populate the dialog
-        current_state = self._capture_state()
-        current_articulation_rad = current_state['yaw_tractor'] - current_state['yaw_trailer']
-        
-        defaults = {
-            "x": f"{current_state['x']:.2f}",
-            "y": f"{current_state['y']:.2f}",
-            "yaw_tractor": f"{math.degrees(current_state['yaw_tractor']):.2f}",
-            "articulation_angle": f"{math.degrees(current_articulation_rad):.2f}"
-        }
-
-        for i, (text, key) in enumerate(fields.items()):
-            tk.Label(frame, text=text).grid(row=i, column=0, sticky='w', pady=2)
-            entry = tk.Entry(frame)
-            entry.grid(row=i, column=1, sticky='ew', pady=2)
-            entry.insert(0, defaults[key])
-            entries[key] = entry
-        
-        frame.grid_columnconfigure(1, weight=1)
-
-        def _apply_manual_state():
+        # Disable main simulation controls
+        for child in self.control_frame.winfo_children():
             try:
-                x = float(entries['x'].get())
-                y = float(entries['y'].get())
-                yaw_tractor_deg = float(entries['yaw_tractor'].get())
-                articulation_angle_deg = float(entries['articulation_angle'].get())
+                if child not in [self.scale_trailer_len, self.trailer_len_label]: # Keep trailer length adjustable
+                    child.config(state=tk.DISABLED)
+            except tk.TclError: # Catch TclError for widgets that don't have a 'state' option
+                pass
+        
+        # Store current canvas bindings and unbind them
+        self.previous_canvas_bindings['<ButtonPress-1>'] = self.canvas.bind('<ButtonPress-1>')
+        self.previous_canvas_bindings['<B1-Motion>'] = self.canvas.bind('<B1-Motion>')
+        self.previous_canvas_bindings['<ButtonRelease-1>'] = self.canvas.bind('<ButtonRelease-1>')
+        self.previous_canvas_bindings['<MouseWheel>'] = self.canvas.bind('<MouseWheel>')
 
-                # Create a partial state and use _restore_state to fill in the rest
-                # Note: We need to calculate yaw_trailer from the articulation angle
-                yaw_tractor_rad = math.radians(yaw_tractor_deg)
-                articulation_angle_rad = math.radians(articulation_angle_deg)
-                yaw_trailer_rad = yaw_tractor_rad - articulation_angle_rad
+        self.canvas.unbind('<ButtonPress-1>')
+        self.canvas.unbind('<B1-Motion>')
+        self.canvas.unbind('<ButtonRelease-1>')
+        self.canvas.unbind('<MouseWheel>')
 
-                # Get a full default state to modify
-                new_state = self._capture_state() 
-                new_state['x'] = x
-                new_state['y'] = y
-                new_state['yaw_tractor'] = yaw_tractor_rad
-                new_state['yaw_trailer'] = yaw_trailer_rad
-                new_state['wheel_paths'] = {} # Clear paths on teleport
+        # Bind new events for Free Set mode
+        self.canvas.bind("<ButtonPress-1>", self._free_set_start_manipulation)
+        self.canvas.bind("<B1-Motion>", self._free_set_manipulation)
+        self.canvas.bind("<ButtonRelease-1>", self._free_set_end_manipulation)
+        self.canvas.bind("<MouseWheel>", self._free_set_rotate_tractor_yaw) # Mouse wheel for tractor rotation
 
-                self._restore_state(new_state)
-                self._initialize_paths() # Re-initialize paths at the new location
+        # Create Free Set control frame
+        self.free_set_control_frame = tk.Frame(self.right_frame, padx=5, pady=5, bg="lightyellow")
+        self.free_set_control_frame.pack(fill=tk.X, pady=(10, 0))
 
-                # Clear and reset history
-                self.history.clear()
-                description = "상태 직접 지정"
-                self.history.append((description, self._capture_state()))
-                self._update_history_listbox()
+        tk.Label(self.free_set_control_frame, text="--- Free Set Mode ---", font=("Arial", 10, "bold"), bg="lightyellow").pack(pady=(0,5))
+        tk.Button(self.free_set_control_frame, text="Save Free Set", command=self._save_free_set_state, fg="green").pack(fill=tk.X, pady=2)
+        tk.Button(self.free_set_control_frame, text="Cancel Free Set", command=self._cancel_free_set_state, fg="red").pack(fill=tk.X, pady=2)
 
-                dialog.destroy()
+        # Initially draw ghost car
+        self.draw_scene()
 
-            except ValueError:
-                messagebox.showerror("입력 오류", "유효한 숫자를 입력해주세요.", parent=dialog)
-            except Exception as e:
-                messagebox.showerror("오류", f"상태 적용 중 오류가 발생했습니다:\n{e}", parent=dialog)
+    def _deactivate_free_set_mode(self):
+        self.logger.info("Free Set 모드 비활성화.")
+        self.free_set_mode = False
+        self.ghost_state = {} # Clear ghost state
+        
+        # Re-enable main simulation controls
+        for child in self.control_frame.winfo_children():
+            try:
+                child.config(state=tk.NORMAL)
+            except tk.TclError: # Catch TclError for widgets that don't have a 'state' option
+                pass
+        
+        # Restore original canvas bindings
+        self.canvas.unbind('<ButtonPress-1>')
+        self.canvas.unbind('<B1-Motion>')
+        self.canvas.unbind('<ButtonRelease-1>')
+        self.canvas.unbind('<MouseWheel>')
 
-        apply_btn = tk.Button(frame, text="적용", command=_apply_manual_state)
-        apply_btn.grid(row=len(fields), column=0, columnspan=2, pady=(10, 0), sticky='ew')
+        if self.previous_canvas_bindings.get('<ButtonPress-1>'):
+            self.canvas.bind('<ButtonPress-1>', self.previous_canvas_bindings['<ButtonPress-1>'])
+        if self.previous_canvas_bindings.get('<B1-Motion>'):
+            self.canvas.bind('<B1-Motion>', self.previous_canvas_bindings['<B1-Motion>'])
+        # Add back general canvas binding if it exists
+        if self.previous_canvas_bindings.get('<ButtonPress-1>') == self._pan_start:
+             self.canvas.bind("<ButtonPress-1>", self._pan_start)
+        if self.previous_canvas_bindings.get('<B1-Motion>') == self._pan_move:
+             self.canvas.bind("<B1-Motion>", self._pan_move)
 
 
+        # Destroy Free Set control frame
+        if self.free_set_control_frame:
+            self.free_set_control_frame.destroy()
+            self.free_set_control_frame = None
+        
+        # Redraw scene to remove ghost car
+        self.draw_scene()
+
+    def _save_free_set_state(self):
+        if self.free_set_mode:
+            self.x = self.ghost_state['x']
+            self.y = self.ghost_state['y']
+            self.yaw_tractor = self.ghost_state['yaw_tractor']
+            self.yaw_trailer = self.ghost_state['yaw_trailer']
+            self._initialize_paths() # Re-initialize paths at the new location
+            self.history.clear() # Clear history on manual state change
+            self._add_to_history("Free Set 상태 저장")
+            messagebox.showinfo("Free Set", "Free Set 상태가 저장되었습니다.")
+            self._deactivate_free_set_mode()
+
+    def _cancel_free_set_state(self):
+        if self.free_set_mode:
+            self._restore_state(self.free_set_initial_state) # Restore the state from before Free Set activation
+            self._deactivate_free_set_mode()
+            messagebox.showinfo("Free Set", "Free Set 상태 변경이 취소되었습니다.")
+            # draw_scene is called by _deactivate_free_set_mode already
+
+    def to_world(self, screen_x, screen_y):
+        if self.auto_follow.get():
+            view_offset_x = self.x * self.pixels_per_meter
+            view_offset_y = self.y * self.pixels_per_meter
+        else:
+            view_offset_x = -self.manual_offset_x
+            view_offset_y = -self.manual_offset_y
+
+        abs_cx, abs_cy = self.canvas_width / 2, self.canvas_height / 2
+        
+        world_x = (screen_x - abs_cx + view_offset_x) / self.pixels_per_meter
+        world_y = (abs_cy - screen_y + view_offset_y) / self.pixels_per_meter
+        return world_x, world_y
+    
+    def _get_world_tractor_corners(self, state, steer_rad=0.0):
+        cab_len = 2.5; cab_center_dist = self.tractor_wb - 0.5 
+        cab_cx = state['x'] + cab_center_dist * math.cos(state['yaw_tractor'])
+        cab_cy = state['y'] + cab_center_dist * math.sin(state['yaw_tractor'])
+        return self._get_rect_corners(cab_cx, cab_cy, state['yaw_tractor'], cab_len, self.tractor_width)
+
+    def _get_world_trailer_corners(self, state):
+        total_visual_len = self.trailer_len + 1.0
+        trailer_swing_len = 2.0
+        container_len = total_visual_len - trailer_swing_len
+        container_center_offset = trailer_swing_len + (container_len / 2.0)
+        container_cx = state['x'] - container_center_offset * math.cos(state['yaw_trailer'])
+        container_cy = state['y'] - container_center_offset * math.sin(state['yaw_trailer'])
+        return self._get_rect_corners(container_cx, container_cy, state['yaw_trailer'], container_len, self.tractor_width)
+
+    def _get_rect_corners(self, cx, cy, yaw, length, width):
+        corners_local=[(length/2,width/2), (length/2,-width/2), (-length/2,-width/2), (-length/2,width/2)]
+        corners_world = []
+        for lx, ly in corners_local:
+            wx = cx + lx * math.cos(yaw) - ly * math.sin(yaw)
+            wy = cy + lx * math.sin(yaw) + ly * math.cos(yaw)
+            corners_world.append((wx, wy))
+        return corners_world
+
+    def _get_tractor_front_center(self, state):
+        # Calculate the center of the front axle of the tractor
+        # The tractor's pivot point (self.x, self.y) is the rear axle.
+        # Front axle is tractor_wb meters forward along yaw_tractor
+        front_axle_x = state['x'] + self.tractor_wb * math.cos(state['yaw_tractor'])
+        front_axle_y = state['y'] + self.tractor_wb * math.sin(state['yaw_tractor'])
+        return front_axle_x, front_axle_y
+
+    def _get_trailer_rear_center(self, state):
+        # Calculate the center of the rear axle of the trailer
+        # The kingpin is at state['x'], state['y']
+        # The trailer's visual rear is at -(self.trailer_len + 1.0) meters along yaw_trailer from kingpin
+        # For simplicity, let's say the rear most point of the trailer
+        total_visual_len = self.trailer_len + 1.0
+        rear_x = state['x'] - total_visual_len * math.cos(state['yaw_trailer'])
+        rear_y = state['y'] - total_visual_len * math.sin(state['yaw_trailer'])
+        return rear_x, rear_y
+
+    def _is_point_in_polygon(self, point, polygon):
+        # Ray casting algorithm
+        x, y = point
+        n = len(polygon)
+        inside = False
+        p1x, p1y = polygon[0]
+        for i in range(n + 1):
+            p2x, p2y = polygon[i % n]
+            if y > min(p1y, p2y):
+                if y <= max(p1y, p2y):
+                    if x <= max(p1x, p2x):
+                        if p1y != p2y:
+                            xinters = (y - p1y) * (p2x - p1x) / (p2y - p1y) + p1x
+                        if p1x == p2x or x <= xinters:
+                            inside = not inside
+            p1x, p1y = p2x, p2y
+        return inside
+
+    def _free_set_start_manipulation(self, event):
+        self.free_set_initial_state = self.ghost_state.copy() # Save state for cancellation
+        world_x, world_y = self.to_world(event.x, event.y)
+        self.start_drag_x = event.x
+        self.start_drag_y = event.y
+
+        # Check for kingpin (highest priority)
+        dist_to_kingpin = math.hypot(world_x - self.ghost_state['x'], world_y - self.ghost_state['y'])
+        if dist_to_kingpin * self.pixels_per_meter < 10: # within 10 pixels of kingpin
+            self.dragging_part = 'kingpin'
+            self.start_part_x = self.ghost_state['x']
+            self.start_part_y = self.ghost_state['y']
+            self.start_part_yaw = self.ghost_state['yaw_tractor'] # Store tractor yaw for rotation ref
+            self.logger.info("Free Set: Kingpin 드래그 시작.")
+            return
+
+        # Check for tractor front (for rotation)
+        tractor_front_x, tractor_front_y = self._get_tractor_front_center(self.ghost_state)
+        dist_to_tractor_front = math.hypot(world_x - tractor_front_x, world_y - tractor_front_y)
+        if dist_to_tractor_front * self.pixels_per_meter < 20: # Wider click area for rotation
+            self.dragging_part = 'tractor_front_rotate'
+            self.start_part_x = tractor_front_x
+            self.start_part_y = tractor_front_y
+            self.start_part_yaw = self.ghost_state['yaw_tractor']
+            self.logger.info("Free Set: 트랙터 전면 회전 드래그 시작.")
+            return
+
+        # Check for trailer rear (for articulation)
+        trailer_rear_x, trailer_rear_y = self._get_trailer_rear_center(self.ghost_state)
+        dist_to_trailer_rear = math.hypot(world_x - trailer_rear_x, world_y - trailer_rear_y)
+        if dist_to_trailer_rear * self.pixels_per_meter < 20: # Wider click area for articulation
+            self.dragging_part = 'trailer_rear_articulate'
+            # For articulation, reference point should be the kingpin, not the dragged point
+            self.start_part_x = self.ghost_state['x']
+            self.start_part_y = self.ghost_state['y']
+            self.start_part_yaw = self.ghost_state['yaw_trailer']
+            self.logger.info("Free Set: 트레일러 후면 꺾임 드래그 시작.")
+            return
+
+        # Check for tractor body (moves tractor, thus kingpin and trailer)
+        cab_len = 2.5; cab_center_dist = self.tractor_wb - 0.5 
+        cab_cx = self.ghost_state['x'] + cab_center_dist * math.cos(self.ghost_state['yaw_tractor'])
+        cab_cy = self.ghost_state['y'] + cab_center_dist * math.sin(self.ghost_state['yaw_tractor'])
+        tractor_body_corners = self._get_rect_corners(cab_cx, cab_cy, self.ghost_state['yaw_tractor'], cab_len, self.tractor_width)
+        if self._is_point_in_polygon((world_x, world_y), tractor_body_corners):
+            self.dragging_part = 'tractor_body'
+            self.start_part_x = self.ghost_state['x']
+            self.start_part_y = self.ghost_state['y']
+            self.logger.info("Free Set: 트랙터 본체 드래그 시작.")
+            return
+
+        # Check for trailer body (moves trailer, kingpin, and tractor together)
+        total_visual_len = self.trailer_len + 1.0
+        trailer_swing_len = 2.0
+        container_len = total_visual_len - trailer_swing_len
+        container_center_offset = trailer_swing_len + (container_len / 2.0)
+        container_cx = self.ghost_state['x'] - container_center_offset * math.cos(self.ghost_state['yaw_trailer'])
+        container_cy = self.ghost_state['y'] - container_center_offset * math.sin(self.ghost_state['yaw_trailer'])
+        trailer_body_corners = self._get_rect_corners(container_cx, container_cy, self.ghost_state['yaw_trailer'], container_len, self.tractor_width)
+        if self._is_point_in_polygon((world_x, world_y), trailer_body_corners):
+            self.dragging_part = 'trailer_body'
+            self.start_part_x = self.ghost_state['x']
+            self.start_part_y = self.ghost_state['y']
+            self.logger.info("Free Set: 트레일러 본체 드래그 시작.")
+            return
+        
+        self.last_mouse_x = event.x # For rotation reference if nothing is dragged
+        self.last_mouse_y = event.y
+
+    def _free_set_manipulation(self, event):
+        if self.dragging_part:
+            world_x, world_y = self.to_world(event.x, event.y)
+            
+            if self.dragging_part == 'kingpin' or self.dragging_part == 'tractor_body' or self.dragging_part == 'trailer_body':
+                # Move kingpin directly
+                self.ghost_state['x'] = world_x
+                self.ghost_state['y'] = world_y
+
+            elif self.dragging_part == 'tractor_front_rotate':
+                # Tractor rotates around its rear axle (which is effectively the kingpin location)
+                # Kingpin position (ghost_state['x'], ghost_state['y']) remains fixed.
+                # Calculate new yaw_tractor based on the angle from the kingpin to the current mouse position.
+                dx = world_x - self.ghost_state['x']
+                dy = world_y - self.ghost_state['y']
+                new_yaw_tractor = math.atan2(dy, dx)
+                
+                self.ghost_state['yaw_tractor'] = new_yaw_tractor
+                
+                # Adjust trailer yaw to maintain the original articulation angle from when drag started.
+                initial_articulation_angle = self.free_set_initial_state['yaw_tractor'] - self.free_set_initial_state['yaw_trailer']
+                self.ghost_state['yaw_trailer'] = new_yaw_tractor - initial_articulation_angle
+
+            elif self.dragging_part == 'trailer_rear_articulate':
+                # Trailer articulates around the fixed kingpin.
+                # Kingpin position (ghost_state['x'], ghost_state['y']) and yaw_tractor remain fixed.
+                # Calculate new yaw_trailer based on the angle from the kingpin to the current mouse position.
+                dx = world_x - self.ghost_state['x']
+                dy = world_y - self.ghost_state['y']
+                new_yaw_trailer = math.atan2(dy, dx) + math.pi # Add pi to flip 180 degrees for rear drag
+                
+                # Normalize angle to be within -pi to pi range if needed
+                if new_yaw_trailer > math.pi:
+                    new_yaw_trailer -= 2 * math.pi
+                elif new_yaw_trailer < -math.pi:
+                    new_yaw_trailer += 2 * math.pi
+                
+                self.ghost_state['yaw_trailer'] = new_yaw_trailer
+                
+            self.last_mouse_x = event.x
+            self.last_mouse_y = event.y
+            self.draw_scene()
+    def _free_set_end_manipulation(self, event):
+        self.dragging_part = None
+        self.logger.info("Free Set: 드래그 종료.")
+
+    def _free_set_rotate_tractor_yaw(self, event):
+        if self.free_set_mode:
+            # For Windows, event.delta is typically 120 per "notch"
+            # For MacOS, event.delta is typically +1/-1 or similar
+            if self.root.tk.call('tk', 'windowingsystem') == 'aqua': # MacOS
+                angle_delta = event.delta * 0.01 # Adjust sensitivity for MacOS
+            else: # Windows/Linux
+                angle_delta = event.delta / 120 * 0.05 # Adjust sensitivity for Windows/Linux
+            
+            # Rotation around current kingpin
+            old_yaw_tractor = self.ghost_state['yaw_tractor']
+            old_yaw_trailer = self.ghost_state['yaw_trailer']
+            
+            # We want to rotate the tractor around the kingpin
+            # And the trailer's yaw should adjust to maintain articulation
+            
+            # Update tractor yaw
+            self.ghost_state['yaw_tractor'] += angle_delta
+
+            # Calculate new trailer yaw to maintain articulation relative to new tractor yaw
+            # Current articulation angle = old_yaw_tractor - old_yaw_trailer
+            # New yaw_trailer = new_yaw_tractor - current_articulation_angle
+            
+            articulation_angle = old_yaw_tractor - old_yaw_trailer
+            self.ghost_state['yaw_trailer'] = self.ghost_state['yaw_tractor'] - articulation_angle
+
+            self.draw_scene()
+            
     def setup_history_panel(self):
         # --- History ---
         history_frame = tk.LabelFrame(self.right_frame, text="--- 조작 기록 (History) ---", padx=5, pady=5)
@@ -448,7 +699,8 @@ class TractorTrailerSim:
 
     def _initialize_paths(self):
         self.wheel_paths.clear()
-        for name, pos in self._get_world_wheel_positions().items(): self.wheel_paths[name]=deque([pos], maxlen=self.max_path_points)
+        current_state = self._capture_state()
+        for name, pos in self._get_world_wheel_positions(state=current_state).items(): self.wheel_paths[name]=deque([pos], maxlen=self.max_path_points)
         self.logger.info("바퀴 궤적 초기화 완료.")
 
     def reset_simulation(self, keep_paths=False):
@@ -486,16 +738,19 @@ class TractorTrailerSim:
         trailer_axles={'tr_rear1':1.1/2, 'tr_rear2':-1.1/2}
         return tractor_axles, trailer_axles
         
-    def _get_world_wheel_positions(self, steer_rad=0.0):
+    def _get_world_wheel_positions(self, steer_rad=0.0, state=None):
+        if state is None:
+            state = {'x': self.x, 'y': self.y, 'yaw_tractor': self.yaw_tractor, 'yaw_trailer': self.yaw_trailer}
+
         positions={}; tractor_axles, trailer_axles=self._get_axle_definitions(); half_w=self.tractor_width/2.0
         # 트랙터 축 계산
         for name, dist in tractor_axles.items():
             is_front = (name == 'front')
-            axle_x = self.x + dist * math.cos(self.yaw_tractor)
-            axle_y = self.y + dist * math.sin(self.yaw_tractor)
+            axle_x = state['x'] + dist * math.cos(state['yaw_tractor'])
+            axle_y = state['y'] + dist * math.sin(state['yaw_tractor'])
             
             final_steer = steer_rad if is_front else 0.0
-            yaw_eff = self.yaw_tractor + final_steer
+            yaw_eff = state['yaw_tractor'] + final_steer
             
             # 바퀴 위치 계산
             wl_x = axle_x + half_w * math.cos(yaw_eff + math.pi/2)
@@ -505,8 +760,8 @@ class TractorTrailerSim:
             positions[f't_{name}_l']=(wl_x,wl_y); positions[f't_{name}_r']=(wr_x,wr_y)
 
         # 트레일러 기준점 (킹핀)
-        kingpin_x = self.x 
-        kingpin_y = self.y
+        kingpin_x = state['x'] 
+        kingpin_y = state['y']
 
         # 트레일러 축 계산
         for name, dist in trailer_axles.items():
@@ -514,17 +769,17 @@ class TractorTrailerSim:
             # 하지만 각 축의 위치는 트레일러의 기하학적 중심을 기준으로 계산하는 것이 더 직관적일 수 있습니다.
             # 여기서는 트레일러의 회전 중심(뒷바퀴 축의 중심)을 기준으로 계산합니다.
             # 트레일러 회전 중심 위치
-            trailer_pivot_x = kingpin_x - self.trailer_len * math.cos(self.yaw_trailer)
-            trailer_pivot_y = kingpin_y - self.trailer_len * math.sin(self.yaw_trailer)
+            trailer_pivot_x = kingpin_x - self.trailer_len * math.cos(state['yaw_trailer'])
+            trailer_pivot_y = kingpin_y - self.trailer_len * math.sin(state['yaw_trailer'])
 
-            axle_x = trailer_pivot_x + dist * math.cos(self.yaw_trailer)
-            axle_y = trailer_pivot_y + dist * math.sin(self.yaw_trailer)
+            axle_x = trailer_pivot_x + dist * math.cos(state['yaw_trailer'])
+            axle_y = trailer_pivot_y + dist * math.sin(state['yaw_trailer'])
             
             # 바퀴 위치 계산
-            wl_x = axle_x + half_w * math.sin(self.yaw_trailer)
-            wl_y = axle_y - half_w * math.cos(self.yaw_trailer)
-            wr_x = axle_x - half_w * math.sin(self.yaw_trailer)
-            wr_y = axle_y + half_w * math.cos(self.yaw_trailer)
+            wl_x = axle_x + half_w * math.sin(state['yaw_trailer'])
+            wl_y = axle_y - half_w * math.cos(state['yaw_trailer'])
+            wr_x = axle_x - half_w * math.sin(state['yaw_trailer'])
+            wr_y = axle_y + half_w * math.cos(state['yaw_trailer'])
             positions[f'{name}_l']=(wl_x, wl_y); positions[f'{name}_r']=(wr_x, wr_y)
         return positions
 
@@ -729,7 +984,7 @@ class TractorTrailerSim:
         angle_diff=self.yaw_tractor-self.yaw_trailer; delta_yaw_trailer=(step_dist/self.trailer_len)*math.sin(angle_diff)
         if direction==1: self.yaw_trailer+=delta_yaw_trailer
         else: self.yaw_trailer-=delta_yaw_trailer
-        for name, pos in self._get_world_wheel_positions(steer_rad).items():
+        for name, pos in self._get_world_wheel_positions(steer_rad, state={'x': self.x, 'y': self.y, 'yaw_tractor': self.yaw_tractor, 'yaw_trailer': self.yaw_trailer}).items():
             if name in self.wheel_paths: self.wheel_paths[name].append(pos)
         self.draw_scene(steer_rad)
         
@@ -815,48 +1070,23 @@ class TractorTrailerSim:
         for i in range(int(-w/gap)-2, int(w/gap)+2): self.canvas.create_line(start_x + i*gap, 0, start_x + i*gap, h, fill="#e0e0e0")
         for i in range(int(-h/gap)-2, int(h/gap)+2): self.canvas.create_line(0, start_y + i*gap, w, start_y + i*gap, fill="#e0e0e0")
 
-        # 3. Wheel paths
+        # 3. Wheel paths (always for the actual truck)
         for name, path in self.wheel_paths.items():
             if len(path)>1:
                 color="#00a0a0" if 't_' in name else "#ff8080"; 
                 if 'front' in name: color="#00ffff"
                 pts=[c for p in list(path) for c in self.to_screen(*p, view_offset_x, view_offset_y)]
                 self.canvas.create_line(pts, fill=color, width=1)
+        
+        # Draw actual truck
+        current_actual_state = {'x': self.x, 'y': self.y, 'yaw_tractor': self.yaw_tractor, 'yaw_trailer': self.yaw_trailer}
+        self._draw_truck(current_actual_state, current_steer, view_offset_x, view_offset_y)
 
-        # 4. Truck bodies (cab, swing areas, container)
-        cab_len = 2.5; cab_center_dist = self.tractor_wb - 0.5 
-        cab_cx = self.x + cab_center_dist * math.cos(self.yaw_tractor); cab_cy = self.y + cab_center_dist * math.sin(self.yaw_tractor)
-        self.draw_rect_body(cab_cx, cab_cy, self.yaw_tractor, cab_len, self.tractor_width, "#8888ff", view_offset_x, view_offset_y)
-        
-        swing_area_len = 3.0
-        swing_area_width = self.tractor_width
-        swing_center_offset = 0.5
-        swing_cx = self.x + swing_center_offset * math.cos(self.yaw_tractor)
-        swing_cy = self.y + swing_center_offset * math.sin(self.yaw_tractor)
-        self.draw_rect_body(swing_cx, swing_cy, self.yaw_tractor, swing_area_len, swing_area_width, "#99bbaa", view_offset_x, view_offset_y)
-        
-        trailer_swing_len = 2.0
-        trailer_swing_center_offset = trailer_swing_len / 2.0
-        swing_cx_tr = self.x - trailer_swing_center_offset * math.cos(self.yaw_trailer)
-        swing_cy_tr = self.y - trailer_swing_center_offset * math.sin(self.yaw_trailer)
-        self.draw_rect_body(swing_cx_tr, swing_cy_tr, self.yaw_trailer, trailer_swing_len, self.tractor_width, "#aaddff", view_offset_x, view_offset_y)
-
-        total_visual_len = self.trailer_len + 1.0
-        container_len = total_visual_len - trailer_swing_len
-        container_center_offset = trailer_swing_len + (container_len / 2.0)
-        container_cx = self.x - container_center_offset * math.cos(self.yaw_trailer)
-        container_cy = self.y - container_center_offset * math.sin(self.yaw_trailer)
-        self.draw_rect_body(container_cx, container_cy, self.yaw_trailer, container_len, self.tractor_width, "#ffaaaa", view_offset_x, view_offset_y)
-        
-        # 5. Wheels
-        wheel_positions = self._get_world_wheel_positions(current_steer)
-        for name, pos in wheel_positions.items():
-            is_front='front' in name; yaw=self.yaw_tractor if 't_' in name else self.yaw_trailer; steer=current_steer if is_front else 0.0
-            self.draw_wheel(pos[0], pos[1], yaw, steer, not is_front, view_offset_x, view_offset_y)
-        
-        # 6. Kingpin
-        kpx, kpy = self.to_screen(self.x, self.y, view_offset_x, view_offset_y)
-        self.canvas.create_oval(kpx-4, kpy-4, kpx+4, kpy+4, fill="yellow", outline="black")
+        # Draw ghost car if Free Set mode is active
+        if self.free_set_mode:
+            # When drawing ghost car, ensure we use its yaw_tractor value for steer calculation for visualization
+            ghost_steer = math.radians(self.scale_angle.get()) # Use current steer from controls for ghost tractor wheels
+            self._draw_truck(self.ghost_state, ghost_steer, view_offset_x, view_offset_y, is_ghost=True)
         
         # Calculate current angle difference
         current_angle_diff_rad = self.yaw_tractor - self.yaw_trailer
@@ -901,19 +1131,65 @@ class TractorTrailerSim:
         self.canvas.create_text(text_center_x, text_top_y, text=info_text_str, 
                                 font=("Arial", 32, "bold"), fill="blue", tags="info_display", anchor='n')
 
-    def draw_wheel(self, cx, cy, yaw, steer, is_dual, view_offset_x, view_offset_y):
+    def draw_wheel(self, cx, cy, yaw, steer, is_dual, view_offset_x, view_offset_y, fill_color="black", outline_color="#333", dash=None):
         wheel_len, wheel_width=0.8, 0.3 if not is_dual else 0.5; final_angle=yaw+steer
         # --------------------------------------------------------------------------------------------------
         # draw_wheel 내부의 'width' 변수명 오류 수정: wheel_width로 변경
         # --------------------------------------------------------------------------------------------------
         corners=[(wheel_len/2,wheel_width/2), (wheel_len/2,-wheel_width/2), (-wheel_len/2,-wheel_width/2), (-wheel_len/2,wheel_width/2)]
         scr_pts=[c for dx,dy in corners for c in self.to_screen(cx+dx*math.cos(final_angle)-dy*math.sin(final_angle), cy+dx*math.sin(final_angle)+dy*math.cos(final_angle), view_offset_x, view_offset_y)]
-        self.canvas.create_polygon(scr_pts, fill="black", outline="#333")
+        self.canvas.create_polygon(scr_pts, fill=fill_color, outline=outline_color, dash=dash)
 
-    def draw_rect_body(self, cx, cy, yaw, length, width, color, view_offset_x, view_offset_y):
+    def draw_rect_body(self, cx, cy, yaw, length, width, color, view_offset_x, view_offset_y, outline_color="black", dash=None):
         corners=[(length/2,width/2), (length/2,-width/2), (-length/2,-width/2), (-length/2,width/2)]
         scr_pts=[c for dx,dy in corners for c in self.to_screen(cx+dx*math.cos(yaw)-dy*math.sin(yaw), cy+dx*math.sin(yaw)+dy*math.cos(yaw), view_offset_x, view_offset_y)]
-        self.canvas.create_polygon(scr_pts, fill=color, outline="black")
+        self.canvas.create_polygon(scr_pts, fill=color, outline=outline_color, dash=dash)
+
+    def _draw_truck(self, state, steer_rad, view_offset_x, view_offset_y, is_ghost=False):
+        # 4. Truck bodies (cab, swing areas, container)
+        cab_len = 2.5; cab_center_dist = self.tractor_wb - 0.5 
+        cab_cx = state['x'] + cab_center_dist * math.cos(state['yaw_tractor']); cab_cy = state['y'] + cab_center_dist * math.sin(state['yaw_tractor'])
+        
+        color_cab = "#8888ff" if not is_ghost else "lightgray"
+        color_swing = "#99bbaa" if not is_ghost else "lightgray"
+        color_trailer_swing = "#aaddff" if not is_ghost else "lightgray"
+        color_container = "#ffaaaa" if not is_ghost else "lightgray"
+        outline_color = "black" if not is_ghost else "darkgray"
+        dash_pattern = None if not is_ghost else (3, 2)
+
+        self.draw_rect_body(cab_cx, cab_cy, state['yaw_tractor'], cab_len, self.tractor_width, color_cab, view_offset_x, view_offset_y, outline_color=outline_color, dash=dash_pattern)
+        
+        swing_area_len = 3.0
+        swing_area_width = self.tractor_width
+        swing_center_offset = 0.5
+        swing_cx = state['x'] + swing_center_offset * math.cos(state['yaw_tractor'])
+        swing_cy = state['y'] + swing_center_offset * math.sin(state['yaw_tractor'])
+        self.draw_rect_body(swing_cx, swing_cy, state['yaw_tractor'], swing_area_len, swing_area_width, color_swing, view_offset_x, view_offset_y, outline_color=outline_color, dash=dash_pattern)
+        
+        trailer_swing_len = 2.0
+        trailer_swing_center_offset = trailer_swing_len / 2.0
+        swing_cx_tr = state['x'] - trailer_swing_center_offset * math.cos(state['yaw_trailer'])
+        swing_cy_tr = state['y'] - trailer_swing_center_offset * math.sin(state['yaw_trailer'])
+        self.draw_rect_body(swing_cx_tr, swing_cy_tr, state['yaw_trailer'], trailer_swing_len, self.tractor_width, color_trailer_swing, view_offset_x, view_offset_y, outline_color=outline_color, dash=dash_pattern)
+
+        total_visual_len = self.trailer_len + 1.0
+        container_len = total_visual_len - trailer_swing_len
+        container_center_offset = trailer_swing_len + (container_len / 2.0)
+        container_cx = state['x'] - container_center_offset * math.cos(state['yaw_trailer'])
+        container_cy = state['y'] - container_center_offset * math.sin(state['yaw_trailer'])
+        self.draw_rect_body(container_cx, container_cy, state['yaw_trailer'], container_len, self.tractor_width, color_container, view_offset_x, view_offset_y, outline_color=outline_color, dash=dash_pattern)
+        
+        # 5. Wheels
+        wheel_positions = self._get_world_wheel_positions(steer_rad, state) # Pass state to get wheel positions
+        for name, pos in wheel_positions.items():
+            is_front='front' in name; yaw=state['yaw_tractor'] if 't_' in name else state['yaw_trailer']; steer=steer_rad if is_front else 0.0
+            wheel_color = "black" if not is_ghost else "darkgray"
+            self.draw_wheel(pos[0], pos[1], yaw, steer, not is_front, view_offset_x, view_offset_y, fill_color=wheel_color, outline_color=outline_color, dash=dash_pattern)
+        
+        # 6. Kingpin
+        kpx, kpy = self.to_screen(state['x'], state['y'], view_offset_x, view_offset_y)
+        kingpin_color = "yellow" if not is_ghost else "darkgray"
+        self.canvas.create_oval(kpx-4, kpy-4, kpx+4, kpy+4, fill=kingpin_color, outline=outline_color, dash=dash_pattern)
 
 if __name__ == "__main__":
     root = tk.Tk()
