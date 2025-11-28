@@ -801,8 +801,23 @@ class TractorTrailerSim:
         else: final_steer=base_steer+(sign*steer_adjustment)
         return max(min(final_steer, math.radians(40)), -math.radians(40))
 
+    def _get_normalized_articulation_degrees(self, yaw_tractor, yaw_trailer):
+        raw_diff_rad = yaw_tractor - yaw_trailer
+        # Normalize to -pi to pi range
+        normalized_diff_rad = math.atan2(math.sin(raw_diff_rad), math.cos(raw_diff_rad))
+        
+        normalized_diff_deg = math.degrees(normalized_diff_rad)
+        
+        # If the angle is > 90 or < -90, convert it to its equivalent within [-90, 90]
+        # For example, 100 degrees (raw) should be seen as -80 degrees of articulation
+        # and 270 degrees (raw) should be seen as -90 degrees.
+        # This is for intuitive display and jackknife check.
+        if normalized_diff_deg > 90:
+            normalized_diff_deg = -(180 - normalized_diff_deg)
+        elif normalized_diff_deg < -90:
+            normalized_diff_deg = (180 + normalized_diff_deg)
 
-
+        return normalized_diff_deg
 
 
     def _capture_state(self):
@@ -946,13 +961,12 @@ class TractorTrailerSim:
         self.animate_step(int(dist_goal/0.078), 0.078, direction, target_angle, description)
 
     def animate_step(self, steps_left, step_dist, direction, target_angle, description):
-        current_angle_diff_rad=self.yaw_tractor-self.yaw_trailer
-        current_angle_diff_deg=abs(math.degrees(current_angle_diff_rad))
+        current_angle_normalized_deg = self._get_normalized_articulation_degrees(self.yaw_tractor, self.yaw_trailer)
 
         # --- v10: 잭나이프(Jackknife) 방지 ---
-        if current_angle_diff_deg > 90.0 and direction == 1: # 전진 시에만 적용
-            self.logger.warning(f"잭나이프 현상 발생! 현재 꺾임 각도: {current_angle_diff_deg:.1f}°. 주행을 중지합니다.")
-            messagebox.showwarning("잭나이프 위험!", f"트랙터와 트레일러의 각도가 90도를 초과했습니다({current_angle_diff_deg:.1f}°).\n\n잭나이프 현상으로 인해 주행을 중지합니다.")
+        if abs(current_angle_normalized_deg) > 90.0 and direction == 1: # 전진 시에만 적용
+            self.logger.warning(f"잭나이프 현상 발생! 현재 꺾임 각도: {current_angle_normalized_deg:.1f}°. 주행을 중지합니다.")
+            messagebox.showwarning("잭나이프 위험!", f"트랙터와 트레일러의 각도가 90도를 초과했습니다({current_angle_normalized_deg:.1f}°).\n\n잭나이프 현상으로 인해 주행을 중지합니다.")
             if self.animation_id: self.root.after_cancel(self.animation_id); self.animation_id=None
             self._add_to_history(description + " (잭나이프 중단)")
             self.draw_scene(current_steer=math.radians(self.scale_angle.get())); return
@@ -961,10 +975,10 @@ class TractorTrailerSim:
         target_mode_active = target_angle is not None
 
         if control_mode == 'stop_at_target' and target_mode_active and self.initial_angle_for_stop is not None:
-            current_error = current_angle_diff_deg - target_angle
+            current_error = current_angle_normalized_deg - target_angle
             if abs(current_error) < 1.0 or (self.previous_angle_error is not None and (current_error * self.previous_angle_error) <= 0):
                 self.logger.info(f"목표 각도 {target_angle}° 도달. 주행 중지."); 
-                messagebox.showinfo("목표 각도 도달", f"현재 꺾임 각도 {current_angle_diff_deg:.1f}°가 목표 {target_angle}°에 도달하여 주행을 중지합니다.")
+                messagebox.showinfo("목표 각도 도달", f"현재 꺾임 각도 {current_angle_normalized_deg:.1f}°가 목표 {target_angle}°에 도달하여 주행을 중지합니다.")
                 if self.animation_id: self.root.after_cancel(self.animation_id); self.animation_id=None
                 self._add_to_history(description)
                 self.draw_scene(current_steer=math.radians(self.scale_angle.get())); return
@@ -978,7 +992,7 @@ class TractorTrailerSim:
 
         steer_rad=math.radians(self.scale_angle.get()) # 기본값: 수동 조향
         if control_mode == 'maintain':
-            steer_rad = self.calculate_steer_for_angle_maintenance(current_angle_diff_rad)
+            steer_rad = self.calculate_steer_for_angle_maintenance(self.yaw_tractor-self.yaw_trailer) # Use raw diff for maintenance calculation
             self.scale_angle.set(math.degrees(steer_rad))
         
         v=step_dist*direction; self.x+=v*math.cos(self.yaw_tractor); self.y+=v*math.sin(self.yaw_tractor); self.yaw_tractor+=(v/self.tractor_wb)*math.tan(steer_rad)
@@ -989,7 +1003,7 @@ class TractorTrailerSim:
             if name in self.wheel_paths: self.wheel_paths[name].append(pos)
         self.draw_scene(steer_rad)
         
-        if steps_left%20==0: self.logger.info(f"주행 중... 현재 꺾임 각도: {current_angle_diff_deg:.1f}° | 헤드 조향각: {math.degrees(steer_rad):.1f}°")
+        if steps_left%20==0: self.logger.info(f"주행 중... 현재 꺾임 각도: {current_angle_normalized_deg:.1f}° | 헤드 조향각: {math.degrees(steer_rad):.1f}°")
         self.animation_id=self.root.after(10, self.animate_step, steps_left-1, step_dist, direction, target_angle, description)
 
 
@@ -1090,8 +1104,8 @@ class TractorTrailerSim:
             self._draw_truck(self.ghost_state, ghost_steer, view_offset_x, view_offset_y, is_ghost=True)
         
         # Calculate current angle difference
-        current_angle_diff_rad = self.yaw_tractor - self.yaw_trailer
-        current_angle_diff_deg = math.degrees(current_angle_diff_rad) # Use actual signed value
+        current_angle_diff_deg = self._get_normalized_articulation_degrees(self.yaw_tractor, self.yaw_trailer)
+
 
         # Determine direction for display (User prefers signed display for non-zero, and 0 for exact)
         if current_angle_diff_deg > 0: 
