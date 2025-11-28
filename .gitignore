@@ -34,6 +34,7 @@ logs/
 # User-specific configuration
 truck_sim_config.json
 truck_sim_presets.json
+Truck_Sim
 
 # Virtual Environments
 .env

@@ -692,7 +692,8 @@ class TractorTrailerSim:
         self.trailer_len = self.trailer_len_var.get()
         self.trailer_len_label.config(text=f"{self.trailer_len:.1f}m")
         self.logger.info(f"트레일러 길이 변경: {self.trailer_len:.1f}m")
-        self.reset_simulation(keep_paths=True) # Redraw with new length
+        self._initialize_paths() # Re-initialize paths to reflect new trailer length based on current vehicle state
+        self.draw_scene(current_steer=math.radians(self.scale_angle.get())) # Redraw scene with new length
 
     def _update_target_angle_display(self, val):
         self.target_angle_display_label.config(text=f"{float(val):.0f}°")
@@ -845,7 +846,7 @@ class TractorTrailerSim:
         self.trailer_len_var.set(state["trailer_len_var"])
         
         if trace_info:
-            self.trailer_len_var.trace_add('write', trace_info[0][1])
+            self.trailer_len_var.trace_add('write', self._update_trailer_len)
         # --- Trace 재활성화 ---
 
         self.auto_follow.set(state["auto_follow"])
