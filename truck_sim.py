@@ -89,6 +89,7 @@ class TractorTrailerSim:
         self.setup_preset_panel()   # New method for preset panel
         self.setup_history_panel()  # Existing method for history panel
         self._load_config()         # Load general config
+        self._setup_default_background() # Load default background if needed
         self._load_presets()        # New method to load presets from file
 
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
@@ -133,6 +134,26 @@ class TractorTrailerSim:
         else:
             self.logger.info("설정 파일이 없어 기본값으로 초기화됩니다.")
             self._save_config() # Create a default config file
+
+    def _setup_default_background(self):
+        # If no background is configured, try to load the default 'course.png'
+        if self.bg_image_path is None or not os.path.exists(self.bg_image_path):
+            default_image_path = "course.png"
+            if os.path.exists(default_image_path):
+                self.logger.info(f"기본 배경 이미지 '{default_image_path}'를 로드합니다.")
+                if self._load_background_from_path(default_image_path):
+                    self.bg_image_path = default_image_path
+                    self.bg_offset_x = -27.0
+                    self.bg_offset_y = -11.0
+                    self.bg_scale = 1.05 # 105%
+
+                    # Update UI controls if they exist
+                    if hasattr(self, 'scale_bg_x'):
+                        self.scale_bg_x.set(self.bg_offset_x)
+                        self.scale_bg_y.set(self.bg_offset_y)
+                        self.scale_bg_scale.set(int(self.bg_scale * 100))
+                    
+                    self._save_config() # Save these new defaults
 
     def _save_config(self):
         config = {
