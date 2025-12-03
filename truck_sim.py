@@ -952,9 +952,9 @@ class TractorTrailerSim:
         self.previous_angle_error = None
 
         if self.angle_control_mode.get() == 'stop_at_target' and target_angle is not None:
-            current_angle_deg = abs(math.degrees(self.yaw_tractor - self.yaw_trailer))
-            self.initial_angle_for_stop = current_angle_deg
-            self.previous_angle_error = current_angle_deg - target_angle
+            current_angle_deg = self._get_normalized_articulation_degrees(self.yaw_tractor, self.yaw_trailer)
+            self.initial_angle_for_stop = abs(current_angle_deg)
+            self.previous_angle_error = abs(current_angle_deg) - target_angle
             self.logger.info(f"목표 각도 정지 모드 시작: 현재 {current_angle_deg:.1f}°, 목표 {target_angle:.1f}°")
 
         self.logger.info(f"주행 시작: 거리={dist_goal}m, 방향={'전진' if direction==1 else '후진'}, 제어={self.angle_control_mode.get()}, 목표각도={target_angle}°")
@@ -975,7 +975,7 @@ class TractorTrailerSim:
         target_mode_active = target_angle is not None
 
         if control_mode == 'stop_at_target' and target_mode_active and self.initial_angle_for_stop is not None:
-            current_error = current_angle_normalized_deg - target_angle
+            current_error = abs(current_angle_normalized_deg) - target_angle
             if abs(current_error) < 1.0 or (self.previous_angle_error is not None and (current_error * self.previous_angle_error) <= 0):
                 self.logger.info(f"목표 각도 {target_angle}° 도달. 주행 중지."); 
                 messagebox.showinfo("목표 각도 도달", f"현재 꺾임 각도 {current_angle_normalized_deg:.1f}°가 목표 {target_angle}°에 도달하여 주행을 중지합니다.")
