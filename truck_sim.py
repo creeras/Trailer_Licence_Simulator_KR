@@ -10,7 +10,7 @@ class TractorTrailerSim:
     CONFIG_FILE = "truck_sim_config.json" # Define config file constant
     def __init__(self, root):
         self.root = root
-        self.root.title("트랙터-트레일러 주행 시뮬레이터 (v1.7 - 프리셋 기능 확장 및 버그 수정)")
+        self.root.title("트랙터-트레일러 주행 시뮬레이터 (v1.8.0 - 시각적 현실감 및 UI 편의성 개선)")
 
         self.animation_id = None
         self.setup_logging()
@@ -196,7 +196,7 @@ class TractorTrailerSim:
         tk.Label(self.control_frame, text="목표 꺾임 각도 (deg)").pack(anchor="w", pady=(5,0))
         self.target_articulation_angle = tk.DoubleVar(value=45.0) 
         self.scale_target_angle = tk.Scale(self.control_frame, from_=0, to=90, orient=tk.HORIZONTAL, resolution=1, 
-                                            variable=self.target_articulation_angle, command=self._update_target_angle_display)
+                                            variable=self.target_articulation_angle, command=self._on_target_angle_change)
         self.scale_target_angle.pack(fill=tk.X)
         
         self.target_angle_display_label = tk.Label(self.control_frame, text=f"{self.target_articulation_angle.get():.0f}°")
@@ -698,6 +698,12 @@ class TractorTrailerSim:
     def _update_target_angle_display(self, val):
         self.target_angle_display_label.config(text=f"{float(val):.0f}°")
 
+    def _on_target_angle_change(self, val):
+        # Automatically select the 'stop_at_target' mode when the user adjusts the slider.
+        self.angle_control_mode.set("stop_at_target")
+        # Update the display label.
+        self._update_target_angle_display(val)
+
     def _initialize_paths(self):
         self.wheel_paths.clear()
         current_state = self._capture_state()
@@ -747,18 +753,21 @@ class TractorTrailerSim:
         # 트랙터 축 계산
         for name, dist in tractor_axles.items():
             is_front = (name == 'front')
+            # Calculate the center of the axle, which is fixed relative to the tractor body
             axle_x = state['x'] + dist * math.cos(state['yaw_tractor'])
             axle_y = state['y'] + dist * math.sin(state['yaw_tractor'])
+
+            # The wheel hub's position is fixed relative to the axle.
+            # The steering angle only affects the visual rotation of the wheel, not its position.
+            hub_offset_angle = state['yaw_tractor'] + math.pi/2
             
-            final_steer = steer_rad if is_front else 0.0
-            yaw_eff = state['yaw_tractor'] + final_steer
-            
-            # 바퀴 위치 계산
-            wl_x = axle_x + half_w * math.cos(yaw_eff + math.pi/2)
-            wl_y = axle_y + half_w * math.sin(yaw_eff + math.pi/2)
-            wr_x = axle_x - half_w * math.cos(yaw_eff + math.pi/2)
-            wr_y = axle_y - half_w * math.sin(yaw_eff + math.pi/2)
-            positions[f't_{name}_l']=(wl_x,wl_y); positions[f't_{name}_r']=(wr_x,wr_y)
+            wl_x = axle_x + half_w * math.cos(hub_offset_angle)
+            wl_y = axle_y + half_w * math.sin(hub_offset_angle)
+            wr_x = axle_x - half_w * math.cos(hub_offset_angle)
+            wr_y = axle_y - half_w * math.sin(hub_offset_angle)
+
+            positions[f't_{name}_l']=(wl_x, wl_y)
+            positions[f't_{name}_r']=(wr_x, wr_y)
 
         # 트레일러 기준점 (킹핀)
         kingpin_x = state['x'] 
@@ -769,9 +778,10 @@ class TractorTrailerSim:
             # 트레일러의 실제 기준점은 킹핀에서 트레일러 길이만큼 뒤에 있습니다.
             # 하지만 각 축의 위치는 트레일러의 기하학적 중심을 기준으로 계산하는 것이 더 직관적일 수 있습니다.
             # 여기서는 트레일러의 회전 중심(뒷바퀴 축의 중심)을 기준으로 계산합니다.
-            # 트레일러 회전 중심 위치
-            trailer_pivot_x = kingpin_x - self.trailer_len * math.cos(state['yaw_trailer'])
-            trailer_pivot_y = kingpin_y - self.trailer_len * math.sin(state['yaw_trailer'])
+            # The visual trailer body was shifted forward by 0.5m, so the wheels must move forward by the same amount.
+            effective_trailer_len_for_wheels = self.trailer_len - 0.5
+            trailer_pivot_x = kingpin_x - effective_trailer_len_for_wheels * math.cos(state['yaw_trailer'])
+            trailer_pivot_y = kingpin_y - effective_trailer_len_for_wheels * math.sin(state['yaw_trailer'])
 
             axle_x = trailer_pivot_x + dist * math.cos(state['yaw_trailer'])
             axle_y = trailer_pivot_y + dist * math.sin(state['yaw_trailer'])
@@ -1162,7 +1172,10 @@ class TractorTrailerSim:
 
     def _draw_truck(self, state, steer_rad, view_offset_x, view_offset_y, is_ghost=False):
         # 4. Truck bodies (cab, swing areas, container)
-        cab_len = 2.5; cab_center_dist = self.tractor_wb - 0.5 
+        # Adjusted visual proportions for cab and swing area (cabin 10% shorter, swing area longer by that amount)
+        cab_len = 2.25 # Original 2.5 - 10%
+        # Shift cab center back by half the reduced length (0.25/2 = 0.125)
+        cab_center_dist = (self.tractor_wb - 0.5) - 0.125
         cab_cx = state['x'] + cab_center_dist * math.cos(state['yaw_tractor']); cab_cy = state['y'] + cab_center_dist * math.sin(state['yaw_tractor'])
         
         color_cab = "#8888ff" if not is_ghost else "lightgray"
@@ -1174,25 +1187,75 @@ class TractorTrailerSim:
 
         self.draw_rect_body(cab_cx, cab_cy, state['yaw_tractor'], cab_len, self.tractor_width, color_cab, view_offset_x, view_offset_y, outline_color=outline_color, dash=dash_pattern)
         
-        swing_area_len = 3.0
+        swing_area_len = 3.25 # Original 3.0 + 0.25
         swing_area_width = self.tractor_width
-        swing_center_offset = 0.5
+        # Shift swing area center forward by half the added length (0.25/2 = 0.125)
+        swing_center_offset = 0.5 + 0.125
         swing_cx = state['x'] + swing_center_offset * math.cos(state['yaw_tractor'])
         swing_cy = state['y'] + swing_center_offset * math.sin(state['yaw_tractor'])
         self.draw_rect_body(swing_cx, swing_cy, state['yaw_tractor'], swing_area_len, swing_area_width, color_swing, view_offset_x, view_offset_y, outline_color=outline_color, dash=dash_pattern)
         
         trailer_swing_len = 2.0
-        trailer_swing_center_offset = trailer_swing_len / 2.0
+        # The light blue part now extends 0.5m in front of the kingpin.
+        # To do this, we shift its center back from 1.0m to 0.5m behind the kingpin.
+        trailer_swing_center_offset = (trailer_swing_len / 2.0) - 0.5 
         swing_cx_tr = state['x'] - trailer_swing_center_offset * math.cos(state['yaw_trailer'])
         swing_cy_tr = state['y'] - trailer_swing_center_offset * math.sin(state['yaw_trailer'])
-        self.draw_rect_body(swing_cx_tr, swing_cy_tr, state['yaw_trailer'], trailer_swing_len, self.tractor_width, color_trailer_swing, view_offset_x, view_offset_y, outline_color=outline_color, dash=dash_pattern)
+        # Draw the gooseneck as a trapezoid shape for realism
+        gooseneck_corners_local = [
+            (trailer_swing_len/2, self.tractor_width/4),      # Front-right
+            (trailer_swing_len/2, -self.tractor_width/4),     # Front-left
+            (-trailer_swing_len/2, -self.tractor_width/2),    # Rear-left
+            (-trailer_swing_len/2, self.tractor_width/2)      # Rear-right
+        ]
+        
+        gooseneck_scr_pts = []
+        yaw = state['yaw_trailer']
+        for dx, dy in gooseneck_corners_local:
+            # Rotate and translate local points to world coordinates
+            wx = swing_cx_tr + dx * math.cos(yaw) - dy * math.sin(yaw)
+            wy = swing_cy_tr + dx * math.sin(yaw) + dy * math.cos(yaw)
+            # Convert world coordinates to screen coordinates
+            screen_coords = self.to_screen(wx, wy, view_offset_x, view_offset_y)
+            gooseneck_scr_pts.extend(screen_coords)
+            
+        self.canvas.create_polygon(gooseneck_scr_pts, fill=color_trailer_swing, outline=outline_color, dash=dash_pattern)
 
         total_visual_len = self.trailer_len + 1.0
         container_len = total_visual_len - trailer_swing_len
-        container_center_offset = trailer_swing_len + (container_len / 2.0)
+        # Adjust container_center_offset to remove gap with light blue part.
+        # The light blue part extends 1.5m behind the kingpin.
+        container_center_offset = 1.5 + (container_len / 2.0) 
         container_cx = state['x'] - container_center_offset * math.cos(state['yaw_trailer'])
         container_cy = state['y'] - container_center_offset * math.sin(state['yaw_trailer'])
         self.draw_rect_body(container_cx, container_cy, state['yaw_trailer'], container_len, self.tractor_width, color_container, view_offset_x, view_offset_y, outline_color=outline_color, dash=dash_pattern)
+        
+        # Add container details (lines and text)
+        if not is_ghost:
+                        # Draw vertical ribs (emphasized)
+                        line_color = "#e08080" # Darker pink
+                        num_lines = int(container_len / 0.375) # A line every 0.375 meters (4x denser)
+                        for i in range(1, num_lines):
+                            dist_from_center = -container_len / 2 + i * (container_len / num_lines)
+                            line_center_x = container_cx + dist_from_center * math.cos(state['yaw_trailer'])
+                            line_center_y = container_cy + dist_from_center * math.sin(state['yaw_trailer'])
+                            
+                            # Make lines slightly shorter to not overlap the container's border
+                            line_width_in_meters = self.tractor_width - (4 / self.pixels_per_meter)
+                            half_line_width = line_width_in_meters / 2
+                            perp_angle = state['yaw_trailer'] + math.pi / 2
+                            
+                            start_x = line_center_x + half_line_width * math.cos(perp_angle)
+                            start_y = line_center_y + half_line_width * math.sin(perp_angle)
+                            end_x = line_center_x - half_line_width * math.cos(perp_angle)
+                            end_y = line_center_y - half_line_width * math.sin(perp_angle)
+                            
+                            screen_start = self.to_screen(start_x, start_y, view_offset_x, view_offset_y)
+                            screen_end = self.to_screen(end_x, end_y, view_offset_x, view_offset_y)
+                            self.canvas.create_line(screen_start[0], screen_start[1], screen_end[0], screen_end[1], fill=line_color, width=2)
+            # Text removed due to rendering jitter
+
+        
         
         # 5. Wheels
         wheel_positions = self._get_world_wheel_positions(steer_rad, state) # Pass state to get wheel positions
