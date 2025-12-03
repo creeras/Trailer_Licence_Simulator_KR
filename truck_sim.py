@@ -10,15 +10,18 @@ class TractorTrailerSim:
     CONFIG_FILE = "truck_sim_config.json" # Define config file constant
     def __init__(self, root):
         self.root = root
-        self.root.title("트랙터-트레일러 주행 시뮬레이터 (v1.8.0 - 시각적 현실감 및 UI 편의성 개선)")
+        self.root.title("트랙터-트레일러 주행 시뮬레이터 (v1.9.0 - 트레일러 길이 UI 개선)")
 
         self.animation_id = None
         self.setup_logging()
         
         # --- 상수 및 변수 ---
         self.tractor_wb = 3.8
-        self.trailer_len_var = tk.DoubleVar(value=10.0) # 트레일러 길이 제어 변수
-        self.trailer_len = self.trailer_len_var.get()
+        self.trailer_swing_len = 2.0 # Fixed length of the light blue gooseneck part
+        # Trailer length var now controls the TOTAL length (gooseneck + container)
+        self.trailer_len_var = tk.DoubleVar(value=11.5) # 기본 총 길이 (하늘색 2.0 + 핑크색 9.5)
+        # self.trailer_len is the length of the pink part, calculated from the total length
+        self.trailer_len = self.trailer_len_var.get() - self.trailer_swing_len
         self.tractor_width = 2.5
         self.pixels_per_meter = 12 
         self.x = 0.0; self.y = 0.0; self.yaw_tractor = 0.0; self.yaw_trailer = 0.0
@@ -175,9 +178,10 @@ class TractorTrailerSim:
         self.root.destroy()
 
     def setup_controls(self):
-        tk.Label(self.control_frame, text="--- 트레일러 길이 ---", font=("Arial", 10, "bold")).pack(anchor="w", pady=(0, 5))
+        tk.Label(self.control_frame, text="--- 트레일러 총 길이 ---", font=("Arial", 10, "bold")).pack(anchor="w", pady=(0, 5))
         self.trailer_len_var.trace_add("write", self._update_trailer_len)
-        self.scale_trailer_len = tk.Scale(self.control_frame, from_=8.5, to=12.0, orient=tk.HORIZONTAL, resolution=0.5,
+        # The scale now controls the TOTAL length. Range is adjusted accordingly.
+        self.scale_trailer_len = tk.Scale(self.control_frame, from_=10.5, to=14.0, orient=tk.HORIZONTAL, resolution=0.5,
                                            variable=self.trailer_len_var, length=200)
         self.scale_trailer_len.pack(fill=tk.X)
         self.trailer_len_label = tk.Label(self.control_frame, text=f"{self.trailer_len_var.get():.1f}m")
@@ -689,9 +693,10 @@ class TractorTrailerSim:
         self.draw_scene(current_steer=math.radians(float(angle_str)))
 
     def _update_trailer_len(self, *args):
-        self.trailer_len = self.trailer_len_var.get()
-        self.trailer_len_label.config(text=f"{self.trailer_len:.1f}m")
-        self.logger.info(f"트레일러 길이 변경: {self.trailer_len:.1f}m")
+        # The var now holds total length, self.trailer_len holds the pink part's length
+        self.trailer_len = self.trailer_len_var.get() - self.trailer_swing_len
+        self.trailer_len_label.config(text=f"{self.trailer_len_var.get():.1f}m")
+        self.logger.info(f"트레일러 총 길이 변경: {self.trailer_len_var.get():.1f}m (핑크색 {self.trailer_len:.1f}m + 하늘색 {self.trailer_swing_len:.1f}m)")
         self._initialize_paths() # Re-initialize paths to reflect new trailer length based on current vehicle state
         self.draw_scene(current_steer=math.radians(self.scale_angle.get())) # Redraw scene with new length
 
@@ -726,7 +731,7 @@ class TractorTrailerSim:
             self.target_articulation_angle.set(45.0)
             self.target_angle_display_label.config(text=f"{self.target_articulation_angle.get():.0f}°")
             
-            self.trailer_len_var.set(10.0)
+            self.trailer_len_var.set(11.5) # Default total length
             self.trailer_len_label.config(text=f"{self.trailer_len_var.get():.1f}m")
             
             self.auto_follow.set(True)
@@ -1203,10 +1208,10 @@ class TractorTrailerSim:
         swing_cy_tr = state['y'] - trailer_swing_center_offset * math.sin(state['yaw_trailer'])
         # Draw the gooseneck as a trapezoid shape for realism
         gooseneck_corners_local = [
-            (trailer_swing_len/2, self.tractor_width/4),      # Front-right
-            (trailer_swing_len/2, -self.tractor_width/4),     # Front-left
-            (-trailer_swing_len/2, -self.tractor_width/2),    # Rear-left
-            (-trailer_swing_len/2, self.tractor_width/2)      # Rear-right
+            (self.trailer_swing_len/2, self.tractor_width/4),      # Front-right
+            (self.trailer_swing_len/2, -self.tractor_width/4),     # Front-left
+            (-self.trailer_swing_len/2, -self.tractor_width/2),    # Rear-left
+            (-self.trailer_swing_len/2, self.tractor_width/2)      # Rear-right
         ]
         
         gooseneck_scr_pts = []
@@ -1222,7 +1227,7 @@ class TractorTrailerSim:
         self.canvas.create_polygon(gooseneck_scr_pts, fill=color_trailer_swing, outline=outline_color, dash=dash_pattern)
 
         total_visual_len = self.trailer_len + 1.0
-        container_len = total_visual_len - trailer_swing_len
+        container_len = total_visual_len - self.trailer_swing_len
         # Adjust container_center_offset to remove gap with light blue part.
         # The light blue part extends 1.5m behind the kingpin.
         container_center_offset = 1.5 + (container_len / 2.0) 
