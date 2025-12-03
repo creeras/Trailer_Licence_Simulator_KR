@@ -10,7 +10,7 @@ class TractorTrailerSim:
     CONFIG_FILE = "truck_sim_config.json" # Define config file constant
     def __init__(self, root):
         self.root = root
-        self.root.title("트랙터-트레일러 주행 시뮬레이터 (v1.9.0 - 트레일러 길이 UI 개선)")
+        self.root.title("트랙터-트레일러 주행 시뮬레이터 (v1.9.1 - 기본 배경 자동 로드 기능 추가)")
 
         self.animation_id = None
         self.setup_logging()
